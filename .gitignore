@@ -1,2 +1,5 @@
 project
 target
+.bloop
+.metals
+test_run_dir

@@ -45,6 +45,8 @@ libraryDependencies ++= Seq(
   "com.lihaoyi" %% "utest" % "latest.integration"
 )
 
+libraryDependencies ++= Seq("edu.berkeley.cs" %% "chisel-testers2" % "0.2-SNAPSHOT")
+
 testFrameworks += new TestFramework("utest.runner.Framework")
 
 publishMavenStyle := true
