@@ -43,8 +43,12 @@ class FFT(samples: Int, bitwidth: Int) extends Module{ //bitwidth is the incomin
     val io = IO(new FFT_IO(bitwidth,samples))
 
     val agu = Module(new AGU(samples))
+    
+    //If even, result is in same memory as samples were stored.
+    //Else, it is in the opposite memory.
+    val finalMemory = log2Ceil(samples) % 2 
 
-    io.running := ~agu.io.done
+    io.running := ~agu.io.done | RegNext(~agu.io.done) //Show running for one more cycle
 
     //Hard applied
     io.mem_audioA_en := 1.B
@@ -148,7 +152,7 @@ class AGU(samples: Int) extends Module{ //Address Generation Unit
         val b_addr = Output(UInt(addr_bits.W))
     })
 
-    val level = RegInit(0.U(log2Ceil(samples).W)) //There are log2 levels
+    val level = RegInit(0.U(log2Ceil(log2Ceil(samples)).W)) //There are log2 levels
     val index = RegInit(0.U((addr_bits).W)) //Index is for each level.
 
 
@@ -179,7 +183,7 @@ class AGU(samples: Int) extends Module{ //Address Generation Unit
 
         when(index === (samples-2).U ){ //When counter resets, except for the first occurence.
 
-            when(level === log2Ceil(samples).U){ //Done
+            when(level === log2Ceil(log2Ceil(samples)).U){ //Done
                 level := 0.U
 
                 running := 0.B
@@ -199,9 +203,8 @@ class AGU(samples: Int) extends Module{ //Address Generation Unit
     for(i <- 0 until addr_bits){
         index0_rotated(i) := 0.B //Default value, not used.
         index1_rotated(i) := 0.B
-        println("Starting loop")
+
         for(j <- 0 until log2Ceil(samples)){
-            println(((i - j + log2Ceil(samples)) % log2Ceil(samples) ))
             when(j.U === level){
                 testWire := j.U
                 

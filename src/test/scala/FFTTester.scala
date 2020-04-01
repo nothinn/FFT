@@ -82,13 +82,19 @@ class FFTTest extends FlatSpec with ChiselScalatestTester with Matchers {
   behavior of "FFTTester"
 
   it should "Calculate an 8 point FFT" in {
-    test(new FFTTestModule(16,8)).withAnnotations(Seq(WriteVcdAnnotation,VerilatorBackendAnnotation)) { c => 
+
+    val bp = 10 //Binary point, number of fractional bits.
+    val one = (1<<bp)-1
+    val input = Seq(one,0,one,0,one,0,0,0)
+    val samples = input.length
+    val bitwidth = 16//bp + 1 + log2Ceil(samples) //Bitgrowth = number of fractional bits + 1 for sign + number of levels
+    test(new FFTTestModule(bitwidth,samples)).withAnnotations(Seq(WriteVcdAnnotation,VerilatorBackendAnnotation)) { c => 
 
 
       c.io.write_test.poke(1.B)
       //Fill out memory
-      val input = Seq((1<<10)-1,0,(1<<10)-1,0,(1<<10)-1,0,0,0)
-      for(i <- 0 until 4){
+
+      for(i <- 0 until samples/2){
         c.io.write_addr_a.poke((i*2).U)
         c.io.write_addr_b.poke((i*2+1).U)
         
@@ -103,7 +109,7 @@ class FFTTest extends FlatSpec with ChiselScalatestTester with Matchers {
       c.clock.step(10)
 
       //Test that memory has been filled correctly
-      for(i <- 0 until 4){
+      for(i <- 0 until samples/2){
         c.io.write_addr_a.poke((i*2).U)
         c.io.write_addr_b.poke((i*2+1).U)
         
@@ -123,6 +129,55 @@ class FFTTest extends FlatSpec with ChiselScalatestTester with Matchers {
         c.clock.step(1)
       }
       c.clock.step(1)
+
+      val finalMemory = c.fft.finalMemory
+
+      for(index <- 0 until samples/2){
+        c.io.write_addr_a.poke((index*2).U)
+        c.io.write_addr_b.poke((index*2+1).U)
+
+        c.io.readB_addr_a.poke((index*2).U)
+        c.io.readB_addr_b.poke((index*2+1).U)
+        
+        c.clock.step(1)
+
+        val out0 = if(c.fft.finalMemory == 0) c.io.read_data_a.peek() else c.io.readB_data_a.peek()
+        val out1 = if(c.fft.finalMemory == 0) c.io.read_data_b.peek() else c.io.readB_data_b.peek()
+
+        //Float 2 fixed
+        def int2float(int: BigInt, bitwidth: Int, bp: Int) = {
+
+          var real_int = int & ((1<<bitwidth)-1)
+          var imag_int = (int >> bitwidth) & ((1<<bitwidth)-1)
+
+
+          if (((real_int>>bitwidth-1)&0x1) == 1){ //Sign bit
+            real_int = ~real_int
+            real_int += 1
+            real_int = real_int & ((1<<bitwidth)-1)
+            real_int *= -1
+          }
+
+          if (((imag_int>>bitwidth-1)&0x1) == 1){
+            imag_int = ~imag_int //Twos complent *-1
+            imag_int += 1
+            imag_int = imag_int & ((1<<bitwidth)-1) //Only keep lower bits
+            imag_int *= -1 //Make bigint negative
+          }
+          
+          val real = real_int.toDouble / ((1<<(bp)).toDouble)
+          val imag = imag_int.toDouble / ((1<<(bp)).toDouble)
+
+          (real, imag)
+        } 
+
+        val (real_0, imag_0) = int2float(out0.litValue(), bitwidth, bp)
+        val (real_1, imag_1) = int2float(out1.litValue(), bitwidth, bp)
+        
+        println("Index %d: %f; %fj".format(index*2, real_0, imag_0))
+        println("Index %d: %f; %fj".format(index*2+1, real_1, imag_1))
+
+      }
     }
   }
 }
