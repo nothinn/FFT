@@ -38,7 +38,7 @@ class FFT_IO(val bitwidth: Int, val samples: Int) extends Bundle{
         val mem_FFT_write = Output(Bool()) //Write for both ports
 }
 
-class FFT(samples: Int, bitwidth: Int) extends Module{ //bitwidth is the incoming bitwidth
+class FFT(samples: Int, bitwidth: Int, bp: Int) extends Module{ //bitwidth is the incoming bitwidth
 
     val io = IO(new FFT_IO(bitwidth,samples))
 
@@ -70,18 +70,18 @@ class FFT(samples: Int, bitwidth: Int) extends Module{ //bitwidth is the incomin
     }
 
     //When switch is high, mem_chooser is delayed one cycle. Hence the MUX.
-    io.mem_audioA_addr := Mux(RegNext(mem_chooser),RegNext(agu.io.a_addr),agu.io.a_addr)
-    io.mem_audioB_addr := Mux(RegNext(mem_chooser),RegNext(agu.io.b_addr),agu.io.b_addr)
+    io.mem_audioA_addr := Mux(RegNext(mem_chooser),RegNext(agu.io.a_addr_write),agu.io.a_addr_read)
+    io.mem_audioB_addr := Mux(RegNext(mem_chooser),RegNext(agu.io.b_addr_write),agu.io.b_addr_read)
     
-    io.mem_FFTA_addr := Mux(RegNext(mem_chooser),agu.io.a_addr,RegNext(agu.io.a_addr))
-    io.mem_FFTB_addr := Mux(RegNext(mem_chooser),agu.io.b_addr,RegNext(agu.io.b_addr))
+    io.mem_FFTA_addr := Mux(RegNext(mem_chooser),agu.io.a_addr_read,RegNext(agu.io.a_addr_write))
+    io.mem_FFTB_addr := Mux(RegNext(mem_chooser),agu.io.b_addr_read,RegNext(agu.io.b_addr_write))
     
 
-    val twiddle = Module(new Twiddle(samples,11))
+    val twiddle = Module(new Twiddle(samples,bp+1)) //bp+1 to include sign
 
     twiddle.io.addr := RegNext(agu.io.twiddle_addr)
 
-    val bfu = Module(new BFU(16,10))
+    val bfu = Module(new BFU(bitwidth,bp))
 
     //Real part is lower bits, while imaginary part is upper bits.
     bfu.io.a_real := Mux(RegNext(RegNext(~mem_chooser)), io.mem_audioA_dataIn(bitwidth-1,0).asSInt, io.mem_FFTA_dataIn(bitwidth-1,0).asSInt)
@@ -148,8 +148,13 @@ class AGU(samples: Int) extends Module{ //Address Generation Unit
 
         val twiddle_addr = Output(UInt((addr_bits-1).W))
 
-        val a_addr = Output(UInt(addr_bits.W))
-        val b_addr = Output(UInt(addr_bits.W))
+        val a_addr_write = Output(UInt(addr_bits.W))
+        val b_addr_write = Output(UInt(addr_bits.W))
+
+        val a_addr_read = Output(UInt(addr_bits.W))
+        val b_addr_read = Output(UInt(addr_bits.W))
+
+        
     })
 
     val level = RegInit(0.U(log2Ceil(log2Ceil(samples)).W)) //There are log2 levels
@@ -183,7 +188,7 @@ class AGU(samples: Int) extends Module{ //Address Generation Unit
 
         when(index === (samples-2).U ){ //When counter resets, except for the first occurence.
 
-            when(level === log2Ceil(log2Ceil(samples)).U){ //Done
+            when(level === (log2Ceil(samples)-1).U){ //Done
                 level := 0.U
 
                 running := 0.B
@@ -214,8 +219,12 @@ class AGU(samples: Int) extends Module{ //Address Generation Unit
         }
     }
 
-    io.a_addr := index0_rotated.asUInt
-    io.b_addr := index1_rotated.asUInt
+    io.a_addr_read := Mux(level =/= 0.U,index0_rotated.asUInt,Reverse(index))
+    io.b_addr_read := Mux(level =/= 0.U,index1_rotated.asUInt,Reverse(index+1.U))
+
+    io.a_addr_write := index0_rotated.asUInt
+    io.b_addr_write := index1_rotated.asUInt
+    
 
     // For 32 samples, 5 bits, this is (0xFFF0 >> level) & (index/2)
     val tmp0 = WireDefault((((1<<(addr_bits-1))-1) << (addr_bits-1)).U)
@@ -254,17 +263,17 @@ class BFU(bitwidth: Int, bp : Int) extends Module{ //ButterFly Unit, bp = Binary
     val c = WireDefault(io.twiddle_real)
     val d = WireDefault(io.twiddle_imag)
 
-    val real = WireDefault((a*c - b*d).asSInt) //Gives bitwidth*2-1 bits
-    val imag  = WireDefault((a*d + b*c).asSInt)
+    val real = WireDefault((a*c - b*d).asSInt ) //Gives bitwidth*2-1 bits
+    val imag  = WireDefault((a*d + b*c).asSInt) //TODO add rounding to minimize quantization error.
 
 
-    val high_bit = bp + bitwidth
-    val low_bit = bp
+    val high_bit = bp + bitwidth -1 
+    val low_bit = bp - 1
 
 
-    io.a_out_real  := (io.a_real + real(high_bit,low_bit).asSInt).asSInt
-    io.a_out_imag  := (io.a_imag + imag(high_bit,low_bit).asSInt).asSInt
+    io.a_out_real  := (io.a_real + (real >> bp).asSInt).asSInt
+    io.a_out_imag  := (io.a_imag + (imag >> bp).asSInt).asSInt
     
-    io.b_out_real  := (io.a_real - real(high_bit,low_bit).asSInt).asSInt
-    io.b_out_imag  := (io.a_imag - imag(high_bit,low_bit).asSInt).asSInt
+    io.b_out_real  := (io.a_real - (real >> bp).asSInt).asSInt
+    io.b_out_imag  := (io.a_imag - (imag >> bp).asSInt).asSInt
 }

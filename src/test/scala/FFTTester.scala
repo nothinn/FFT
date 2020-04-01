@@ -7,7 +7,7 @@ import chiseltest.experimental.TestOptionBuilder._
 import chiseltest.internal.{VerilatorBackendAnnotation, WriteVcdAnnotation}
 
 
-class FFTTestModule(bitwidth: Int, samples: Int) extends Module{
+class FFTTestModule(bitwidth: Int, samples: Int, bp: Int) extends Module{
   
   val io = IO(new Bundle{
 
@@ -35,7 +35,7 @@ class FFTTestModule(bitwidth: Int, samples: Int) extends Module{
   })
 
 
-  val fft = Module(new FFT(samples,bitwidth))
+  val fft = Module(new FFT(samples,bitwidth, bp))
 
   io.running := fft.io.running
   //fft.io.audio_ready := io.audio_ready
@@ -83,12 +83,12 @@ class FFTTest extends FlatSpec with ChiselScalatestTester with Matchers {
 
   it should "Calculate an 8 point FFT" in {
 
-    val bp = 10 //Binary point, number of fractional bits.
+    val bp = 13 //Binary point, number of fractional bits.
     val one = (1<<bp)-1
-    val input = Seq(one,0,one,0,one,0,0,0)
+    val input = Seq(one,one,0,0,one,one,0,0,one,one,0,0,one,one,0,one)
     val samples = input.length
-    val bitwidth = 16//bp + 1 + log2Ceil(samples) //Bitgrowth = number of fractional bits + 1 for sign + number of levels
-    test(new FFTTestModule(bitwidth,samples)).withAnnotations(Seq(WriteVcdAnnotation,VerilatorBackendAnnotation)) { c => 
+    val bitwidth = bp + 1 + log2Ceil(samples) //Bitgrowth = number of fractional bits + 1 for sign + number of levels
+    test(new FFTTestModule(bitwidth,samples, bp)).withAnnotations(Seq(WriteVcdAnnotation,VerilatorBackendAnnotation)) { c => 
 
 
       c.io.write_test.poke(1.B)
@@ -151,14 +151,14 @@ class FFTTest extends FlatSpec with ChiselScalatestTester with Matchers {
           var imag_int = (int >> bitwidth) & ((1<<bitwidth)-1)
 
 
-          if (((real_int>>bitwidth-1)&0x1) == 1){ //Sign bit
+          if (((real_int>>(bitwidth-1))&0x1) == 1){ //Sign bit
             real_int = ~real_int
             real_int += 1
             real_int = real_int & ((1<<bitwidth)-1)
             real_int *= -1
           }
 
-          if (((imag_int>>bitwidth-1)&0x1) == 1){
+          if (((imag_int>>(bitwidth-1))&0x1) == 1){
             imag_int = ~imag_int //Twos complent *-1
             imag_int += 1
             imag_int = imag_int & ((1<<bitwidth)-1) //Only keep lower bits
@@ -202,20 +202,20 @@ class FFTComponentTest extends FlatSpec with ChiselScalatestTester with Matchers
       c.clock.step()
       c.io.start.poke(0.B)
 
-      c.io.a_addr.expect(0.U)
-      c.io.b_addr.expect(4.U)
+      c.io.a_addr_read.expect(0.U)
+      c.io.b_addr_read.expect(4.U)
       c.clock.step()
 
-      c.io.a_addr.expect(2.U)
-      c.io.b_addr.expect(6.U)
+      c.io.a_addr_read.expect(2.U)
+      c.io.b_addr_read.expect(6.U)
       c.clock.step()
 
-      c.io.a_addr.expect(1.U)
-      c.io.b_addr.expect(5.U)
+      c.io.a_addr_read.expect(1.U)
+      c.io.b_addr_read.expect(5.U)
       c.clock.step()
 
-      c.io.a_addr.expect(3.U)
-      c.io.b_addr.expect(7.U)
+      c.io.a_addr_read.expect(3.U)
+      c.io.b_addr_read.expect(7.U)
       c.clock.step()
     }
   }
