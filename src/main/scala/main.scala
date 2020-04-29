@@ -4,8 +4,7 @@ import chisel3.util._
 // generate Verilog
 object FFTMain extends App {
 
-
-  chisel3.Driver.execute(args, () => new Twiddle(32,16))
+  chisel3.Driver.execute(args, () => new FFT(128,16,8))
 
 
 }

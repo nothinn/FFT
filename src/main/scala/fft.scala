@@ -1,41 +1,71 @@
 import chisel3._
 import chisel3.util._
 
-
-
 class FFT_IO(val bitwidth: Int, val samples: Int) extends Bundle{
         //val audio_ready = Input(Bool()) //Indicates that the audio memory is filled
         val running     = Output(Bool())//Indicates that the FFT is being calculated
 
         val start       = Input(Bool())
 
-        //Memory containing the audio samples
-        val mem_audioA_dataIn = Input(UInt((bitwidth*2).W))
-        val mem_audioA_dataOut = Output(UInt((bitwidth*2).W))
-        val mem_audioA_addr = Output(UInt(log2Ceil(samples).W))
-
-        val mem_audioB_dataIn = Input(UInt((bitwidth*2).W))
-        val mem_audioB_dataOut = Output(UInt((bitwidth*2).W))
-        val mem_audioB_addr = Output(UInt(log2Ceil(samples).W))
-
-        val mem_audioA_en   = Output(Bool())
-        val mem_audioB_en   = Output(Bool())
-
-        val mem_audio_write = Output(Bool()) //Write for both ports
+        val stall       = Input(Bool())
         
+        //Memory containing samples
+        val mem_audioA = new MemReq()
+        val mem_audioB = new MemReq()
 
         //Memory containing the FFT output
-        val mem_FFTA_dataIn = Input(UInt((bitwidth*2).W))
-        val mem_FFTA_dataOut = Output(UInt((bitwidth*2).W))
-        val mem_FFTA_addr = Output(UInt(log2Ceil(samples).W))
-        val mem_FFTA_en   = Output(Bool())
+        val mem_FFTA = new MemReq()
+        val mem_FFTB = new MemReq()
+        
 
-        val mem_FFTB_dataIn = Input(UInt((bitwidth*2).W))
-        val mem_FFTB_dataOut = Output(UInt((bitwidth*2).W))
-        val mem_FFTB_addr = Output(UInt(log2Ceil(samples).W))
-        val mem_FFTB_en   = Output(Bool())
+}
 
-        val mem_FFT_write = Output(Bool()) //Write for both ports
+class MemReq extends Bundle{
+    val addr    = Output(UInt(32.W))
+    val data_out= Output(UInt(32.W))
+    val data_in = Input(UInt(32.W))
+    val write   = Output(Bool())
+    val en      = Output(Bool())
+}
+
+class FFTSingleMem(samples: Int, bitwidth: Int, bp: Int) extends Module{
+
+    val io = IO(new Bundle{
+        val running = Output(Bool())
+        val start   = Input(Bool())
+
+        val mem     = new MemReq()
+    })
+
+
+    val fft = Module(new FFT(samples,bitwidth,bp))
+
+
+    io.running := fft.io.running
+    fft.io.start := io.start
+
+
+    val memRegVec = Reg(Vec(4,UInt(32.W)))
+    val memEn     = Wire(Vec(4,Bool()))
+
+
+
+    val arbiter = Module(new Arbiter(new MemReq(),4))
+
+
+
+    val memResp   = Reg(Vec(4,Bool()))
+
+    //fft.io.mem_audioA_dataIn := memRegVec(0)
+    //fft.io.mem_audioB_dataIn := memRegVec(1)
+    //fft.io.mem_FFTA_dataIn   := memRegVec(2)
+    fft.io.mem_FFTB.data_in   := memRegVec(3)
+
+    
+    fft.io.stall := ~memResp.asUInt().andR() //Stall when not all requests are valid
+    
+
+
 }
 
 class FFT(samples: Int, bitwidth: Int, bp: Int) extends Module{ //bitwidth is the incoming bitwidth
@@ -50,60 +80,63 @@ class FFT(samples: Int, bitwidth: Int, bp: Int) extends Module{ //bitwidth is th
 
     io.running := ~agu.io.done | RegNext(~agu.io.done) //Show running for one more cycle
 
+
     //Hard applied
-    io.mem_audioA_en := 1.B
-    io.mem_audioB_en := 1.B
+    io.mem_audioA.en := 1.B & ~io.stall
+    io.mem_audioB.en := 1.B & ~io.stall
 
-    io.mem_FFTA_en := 1.B
-    io.mem_FFTB_en := 1.B
+    io.mem_FFTA.en := 1.B & ~io.stall
+    io.mem_FFTB.en := 1.B & ~io.stall
 
-    
- 
-    
+
+    agu.io.stall := io.stall
 
     agu.io.start := io.start
 
     val mem_chooser = RegInit(0.B)
 
-    when(agu.io.switch){
+    when(agu.io.switch & ~io.stall){
         mem_chooser := ~mem_chooser
     }
 
     //When switch is high, mem_chooser is delayed one cycle. Hence the MUX.
-    io.mem_audioA_addr := Mux(RegNext(mem_chooser),RegNext(agu.io.a_addr_write),agu.io.a_addr_read)
-    io.mem_audioB_addr := Mux(RegNext(mem_chooser),RegNext(agu.io.b_addr_write),agu.io.b_addr_read)
+    io.mem_audioA.addr := Mux(RegEnable(mem_chooser,~io.stall),RegEnable(agu.io.a_addr_write,~io.stall),agu.io.a_addr_read)
+    io.mem_audioB.addr := Mux(RegEnable(mem_chooser,~io.stall),RegEnable(agu.io.b_addr_write,~io.stall),agu.io.b_addr_read)
     
-    io.mem_FFTA_addr := Mux(RegNext(mem_chooser),agu.io.a_addr_read,RegNext(agu.io.a_addr_write))
-    io.mem_FFTB_addr := Mux(RegNext(mem_chooser),agu.io.b_addr_read,RegNext(agu.io.b_addr_write))
+    io.mem_FFTA.addr := Mux(RegEnable(mem_chooser,~io.stall),agu.io.a_addr_read,RegEnable(agu.io.a_addr_write,~io.stall))
+    io.mem_FFTB.addr := Mux(RegEnable(mem_chooser,~io.stall),agu.io.b_addr_read,RegEnable(agu.io.b_addr_write,~io.stall))
     
 
     val twiddle = Module(new Twiddle(samples,bp+1)) //bp+1 to include sign
 
-    twiddle.io.addr := RegNext(agu.io.twiddle_addr)
+    twiddle.io.addr := RegEnable(agu.io.twiddle_addr,~io.stall)
 
     val bfu = Module(new BFU(bitwidth,bp))
 
     //Real part is lower bits, while imaginary part is upper bits.
-    bfu.io.a_real := Mux(RegNext(RegNext(~mem_chooser)), io.mem_audioA_dataIn(bitwidth-1,0).asSInt, io.mem_FFTA_dataIn(bitwidth-1,0).asSInt)
-    bfu.io.a_imag := Mux(RegNext(RegNext(~mem_chooser)), io.mem_audioA_dataIn(bitwidth*2-1,bitwidth).asSInt, io.mem_FFTA_dataIn(bitwidth*2-1,bitwidth).asSInt)
+    bfu.io.a_real := Mux(RegEnable(RegEnable(~mem_chooser,~io.stall),~io.stall), io.mem_audioA.data_in(bitwidth-1,0).asSInt, io.mem_FFTA.data_in(bitwidth-1,0).asSInt)
+    bfu.io.a_imag := Mux(RegEnable(RegEnable(~mem_chooser,~io.stall),~io.stall), io.mem_audioA.data_in(bitwidth*2-1,bitwidth).asSInt, io.mem_FFTA.data_in(bitwidth*2-1,bitwidth).asSInt)
     
 
-    bfu.io.b_real := Mux(RegNext(RegNext(~mem_chooser)), io.mem_audioB_dataIn(bitwidth-1,0).asSInt, io.mem_FFTB_dataIn(bitwidth-1,0).asSInt)
-    bfu.io.b_imag := Mux(RegNext(RegNext(~mem_chooser)), io.mem_audioB_dataIn(bitwidth*2-1,bitwidth).asSInt, io.mem_FFTB_dataIn(bitwidth*2-1,bitwidth).asSInt)
+    bfu.io.b_real := Mux(RegEnable(RegEnable(~mem_chooser,~io.stall),~io.stall), io.mem_audioB.data_in(bitwidth-1,0).asSInt, io.mem_FFTB.data_in(bitwidth-1,0).asSInt)
+    bfu.io.b_imag := Mux(RegEnable(RegEnable(~mem_chooser,~io.stall),~io.stall), io.mem_audioB.data_in(bitwidth*2-1,bitwidth).asSInt, io.mem_FFTB.data_in(bitwidth*2-1,bitwidth).asSInt)
     
 
     bfu.io.twiddle_real := twiddle.io.twiddle_real
     bfu.io.twiddle_imag := twiddle.io.twiddle_imag
 
-    io.mem_audioA_dataOut := bfu.io.a_out_imag ## bfu.io.a_out_real
-    io.mem_audioB_dataOut := bfu.io.b_out_imag ## bfu.io.b_out_real
+    io.mem_audioA.data_out := bfu.io.a_out_imag ## bfu.io.a_out_real
+    io.mem_audioB.data_out := bfu.io.b_out_imag ## bfu.io.b_out_real
 
-    io.mem_FFTA_dataOut := bfu.io.a_out_imag ## bfu.io.a_out_real
-    io.mem_FFTB_dataOut := bfu.io.b_out_imag ## bfu.io.b_out_real
+    io.mem_FFTA.data_out := bfu.io.a_out_imag ## bfu.io.a_out_real
+    io.mem_FFTB.data_out := bfu.io.b_out_imag ## bfu.io.b_out_real
 
 
-    io.mem_audio_write := RegNext(mem_chooser && (~agu.io.done)) & RegNext(RegNext(~agu.io.skip))
-    io.mem_FFT_write :=   RegNext(~mem_chooser && (~agu.io.done)) & RegNext(RegNext(~agu.io.skip))
+    io.mem_audioA.write := RegEnable(mem_chooser && (~agu.io.done),~io.stall) & RegEnable(RegEnable(~agu.io.skip,~io.stall),~io.stall) & ~io.stall
+    io.mem_audioB.write := RegEnable(mem_chooser && (~agu.io.done),~io.stall) & RegEnable(RegEnable(~agu.io.skip,~io.stall),~io.stall) & ~io.stall
+   
+    io.mem_FFTA.write  := RegEnable(~mem_chooser && (~agu.io.done),~io.stall) & RegEnable(RegEnable(~agu.io.skip,~io.stall),~io.stall)& ~io.stall
+    io.mem_FFTB.write  := RegEnable(~mem_chooser && (~agu.io.done),~io.stall) & RegEnable(RegEnable(~agu.io.skip,~io.stall),~io.stall)& ~io.stall
 
 }
 
@@ -139,6 +172,10 @@ class Twiddle(samples: Int, bitwidth: Int) extends Module{
 class AGU(samples: Int) extends Module{ //Address Generation Unit
     val addr_bits = log2Ceil(samples)
     val io = IO(new Bundle{
+        val stall = Input(Bool()) //Stalls when some inputs are not ready yet
+        //Can be changed to include per input stalling or ready thing
+        //which would allow for calculating when ready
+
         val start = Input(Bool()) //Treated as a pulsed signal.
         val done = Output(Bool())
 
@@ -174,14 +211,14 @@ class AGU(samples: Int) extends Module{ //Address Generation Unit
 
     io.skip := 0.B
 
-    val skipped = RegNext(io.skip)
+    val skipped = RegEnable(io.skip,~io.stall)
 
     when(io.start){
         running := 1.B
     }
 
     io.switch := 0.B //Default value
-    when(running){
+    when(running & ~io.stall){
         when(~skipped){
             index := index + 2.U;
         }

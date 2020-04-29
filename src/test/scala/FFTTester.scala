@@ -37,6 +37,11 @@ class FFTTestModule(bitwidth: Int, samples: Int, bp: Int) extends Module{
 
   val fft = Module(new FFT(samples,bitwidth, bp))
 
+  val counter = Counter(6)
+
+  //fft.io.stall := 0.B// ~counter.inc()
+  fft.io.stall := ~counter.inc()
+
   io.running := fft.io.running
   //fft.io.audio_ready := io.audio_ready
   fft.io.start := io.start
@@ -44,7 +49,7 @@ class FFTTestModule(bitwidth: Int, samples: Int, bp: Int) extends Module{
 
   val memA = SyncReadMem(samples, UInt((bitwidth*2).W))
   val memB = SyncReadMem(samples, UInt((bitwidth*2).W))
-
+  
   io.read_data_a := memA(io.write_addr_a)
   io.read_data_b := memA(io.write_addr_b)
   
@@ -59,23 +64,44 @@ class FFTTestModule(bitwidth: Int, samples: Int, bp: Int) extends Module{
     memA.write(io.write_addr_b, io.write_data_b)
   }
 
-  when(fft.io.mem_audio_write){
-    memA.write(fft.io.mem_audioA_addr,fft.io.mem_audioA_dataOut)
-    memA.write(fft.io.mem_audioB_addr,fft.io.mem_audioB_dataOut)
+  when(fft.io.mem_audioA.en){
+    when(fft.io.mem_audioA.write){
+      memA.write(fft.io.mem_audioA.addr,fft.io.mem_audioA.data_out)
+    }
+  }
+  when(fft.io.mem_audioB.en){
+    when(fft.io.mem_audioB.write){
+      memA.write(fft.io.mem_audioB.addr,fft.io.mem_audioB.data_out)
+    }
   }
 
-  when(fft.io.mem_FFT_write){
-    memB.write(fft.io.mem_FFTA_addr,fft.io.mem_FFTA_dataOut)
-    memB.write(fft.io.mem_FFTB_addr,fft.io.mem_FFTB_dataOut)
+
+  when(fft.io.mem_FFTA.en){
+    when(fft.io.mem_FFTA.write){
+      memB.write(fft.io.mem_FFTA.addr,fft.io.mem_FFTA.data_out)
+    }
+  }
+  when(fft.io.mem_FFTB.en){
+    when(fft.io.mem_FFTB.write){
+      memB.write(fft.io.mem_FFTB.addr,fft.io.mem_FFTB.data_out)
+    }
   }
 
+  when(fft.io.mem_audioA.en){
+    fft.io.mem_audioA.data_in := memA(fft.io.mem_audioA.addr)
+    fft.io.mem_audioB.data_in := memA(fft.io.mem_audioB.addr)
+  }.otherwise{
+    fft.io.mem_audioA.data_in := RegEnable(memA(fft.io.mem_audioA.addr),fft.io.mem_audioA.en)
+    fft.io.mem_audioB.data_in := RegEnable(memA(fft.io.mem_audioB.addr),fft.io.mem_audioB.en)
+  }
 
-  fft.io.mem_audioA_dataIn := memA(fft.io.mem_audioA_addr)
-  fft.io.mem_audioB_dataIn := memA(fft.io.mem_audioB_addr)
-
-  fft.io.mem_FFTA_dataIn := memB(fft.io.mem_FFTA_addr)
-  fft.io.mem_FFTB_dataIn := memB(fft.io.mem_FFTB_addr)
-
+  when(fft.io.mem_FFTA.en){
+    fft.io.mem_FFTA.data_in := memB(fft.io.mem_FFTA.addr)
+    fft.io.mem_FFTB.data_in := memB(fft.io.mem_FFTB.addr)
+  }.otherwise{
+    fft.io.mem_FFTA.data_in := RegEnable(memB(fft.io.mem_FFTA.addr),fft.io.mem_FFTA.en)
+    fft.io.mem_FFTB.data_in := RegEnable(memB(fft.io.mem_FFTB.addr),fft.io.mem_FFTB.en)
+  }
 }
 
 class FFTTest extends FlatSpec with ChiselScalatestTester with Matchers {
@@ -83,13 +109,12 @@ class FFTTest extends FlatSpec with ChiselScalatestTester with Matchers {
 
   it should "Calculate an 8 point FFT" in {
 
-    val bp = 13 //Binary point, number of fractional bits.
+    val bp = 11 //Binary point, number of fractional bits.
     val one = (1<<bp)-1
     val input = Seq(one,one,0,0,one,one,0,0,one,one,0,0,one,one,0,one)
     val samples = input.length
     val bitwidth = bp + 1 + log2Ceil(samples) //Bitgrowth = number of fractional bits + 1 for sign + number of levels
     test(new FFTTestModule(bitwidth,samples, bp)).withAnnotations(Seq(WriteVcdAnnotation,VerilatorBackendAnnotation)) { c => 
-
 
       c.io.write_test.poke(1.B)
       //Fill out memory
@@ -123,7 +148,7 @@ class FFTTest extends FlatSpec with ChiselScalatestTester with Matchers {
       c.clock.step(10)
       c.io.start.poke(1.B)
 
-      c.clock.step(2)
+      c.clock.step(4)
       c.io.start.poke(0.B)
       while(c.io.running.peek().litToBoolean == true){
         c.clock.step(1)
@@ -185,8 +210,6 @@ class FFTTest extends FlatSpec with ChiselScalatestTester with Matchers {
 
 
 class FFTComponentTest extends FlatSpec with ChiselScalatestTester with Matchers {
-  
-
   behavior of "AGUTester"
   it should "Generate correct memory addressing for 8 samples" in {
     test(new AGU(8)).withAnnotations(Seq(WriteVcdAnnotation)) { c =>
