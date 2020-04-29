@@ -6,6 +6,157 @@ import chiseltest._
 import chiseltest.experimental.TestOptionBuilder._
 import chiseltest.internal.{VerilatorBackendAnnotation, WriteVcdAnnotation}
 
+class FFTTestSingleModule(bitwidth: Int, samples: Int, bp: Int) extends Module{
+  val io = IO(new Bundle{
+    val running     = Output(Bool())//Indicates that the FFT is being calculated
+    val start       = Input(Bool())
+
+
+    val testMemReq = Flipped(new MemReq())
+  })
+
+
+  val fft = Module(new FFTSingle(samples,bitwidth,bp))
+
+  
+  val counter = Counter(2)
+  val valid = ~counter.inc()
+  fft.io.mem.valid := RegNext(valid)//Always valid. Change to test when not always true.
+
+  io.testMemReq.valid := 1.B
+
+  io.running := fft.io.running
+  fft.io.start := io.start
+
+
+  //Memory should be able tom hold number of samples and the result, hence *2
+  val mem = SyncReadMem(samples*2, UInt((bitwidth*2).W))
+
+  fft.io.mem.data_in := 0xffffffffL.U
+  when(fft.io.mem.en){
+    fft.io.mem.data_in := mem(fft.io.mem.addr)
+    when(fft.io.mem.write & valid){
+      mem.write(fft.io.mem.addr,fft.io.mem.data_out)
+    }
+  }
+
+
+  io.testMemReq.data_in := mem(io.testMemReq.addr)
+  when(io.testMemReq.write){
+    mem.write(io.testMemReq.addr, io.testMemReq.data_out)
+  }
+
+}
+
+
+
+
+
+
+class FFTSingleTest extends FlatSpec with ChiselScalatestTester with Matchers {
+  behavior of "FFTSingleTester"
+
+  it should "Calculate an 8 point FFT" in {
+
+    val bp = 11 //Binary point, number of fractional bits.
+    val one = (1<<bp)-1
+    val input = Seq(one,one,one,0,0,0,0,0)
+    val samples = input.length
+    val bitwidth = bp + 1 + log2Ceil(samples) //Bitgrowth = number of fractional bits + 1 for sign + number of levels
+    test(new FFTTestSingleModule(bitwidth,samples, bp)).withAnnotations(Seq(WriteVcdAnnotation,VerilatorBackendAnnotation)) { c => 
+
+      c.io.testMemReq.write.poke(1.B)
+      //Fill out memory
+
+      for(i <- 0 until samples){
+        
+        c.io.testMemReq.addr.poke((i).U)
+       
+        c.io.testMemReq.data_out.poke(input(i).U)
+       
+        c.clock.step(1)
+      }
+
+      c.io.testMemReq.write.poke(0.B)
+
+      c.clock.step(10)
+
+      //Test that memory has been filled correctly
+      for(i <- 0 until samples){
+        c.io.testMemReq.addr.poke((i).U)
+
+        c.clock.step(1)
+
+        c.io.testMemReq.data_in.expect(input(i).U)
+      }
+
+
+      c.clock.step(10)
+      c.io.start.poke(1.B)
+
+      c.clock.step(4)
+      c.io.start.poke(0.B)
+      while(c.io.running.peek().litToBoolean == true){
+        c.clock.step(1)
+      }
+      c.clock.step(1)
+
+      val finalMemory = c.fft.finalMemory
+
+      for(index <- 0 until samples/2){
+        c.io.testMemReq.addr.poke(((finalMemory<<log2Ceil(samples)) + index*2).U)
+        c.clock.step(1)
+
+        val out0 = c.io.testMemReq.data_in.peek()
+        c.io.testMemReq.addr.poke(((finalMemory<<log2Ceil(samples)) + index*2+1).U)
+        c.clock.step(1)
+        val out1 = c.io.testMemReq.data_in.peek()
+        
+        //Float 2 fixed
+        def int2float(int: BigInt, bitwidth: Int, bp: Int) = {
+
+          var real_int = int & ((1<<bitwidth)-1)
+          var imag_int = (int >> bitwidth) & ((1<<bitwidth)-1)
+
+
+          if (((real_int>>(bitwidth-1))&0x1) == 1){ //Sign bit
+            real_int = ~real_int
+            real_int += 1
+            real_int = real_int & ((1<<bitwidth)-1)
+            real_int *= -1
+          }
+
+          if (((imag_int>>(bitwidth-1))&0x1) == 1){
+            imag_int = ~imag_int //Twos complent *-1
+            imag_int += 1
+            imag_int = imag_int & ((1<<bitwidth)-1) //Only keep lower bits
+            imag_int *= -1 //Make bigint negative
+          }
+          
+          val real = real_int.toDouble / ((1<<(bp)).toDouble)
+          val imag = imag_int.toDouble / ((1<<(bp)).toDouble)
+
+          (real, imag)
+        } 
+
+        val (real_0, imag_0) = int2float(out0.litValue(), bitwidth, bp)
+        val (real_1, imag_1) = int2float(out1.litValue(), bitwidth, bp)
+        
+        println("Index %d: %f; %fj".format(index*2, real_0, imag_0))
+        println("Index %d: %f; %fj".format(index*2+1, real_1, imag_1))
+
+      }
+    }
+  }
+}
+
+
+
+
+
+
+
+
 
 class FFTTestModule(bitwidth: Int, samples: Int, bp: Int) extends Module{
   
@@ -111,7 +262,7 @@ class FFTTest extends FlatSpec with ChiselScalatestTester with Matchers {
 
     val bp = 11 //Binary point, number of fractional bits.
     val one = (1<<bp)-1
-    val input = Seq(one,one,0,0,one,one,0,0,one,one,0,0,one,one,0,one)
+    val input = Seq(one,one,one,0,0,0,0,0)
     val samples = input.length
     val bitwidth = bp + 1 + log2Ceil(samples) //Bitgrowth = number of fractional bits + 1 for sign + number of levels
     test(new FFTTestModule(bitwidth,samples, bp)).withAnnotations(Seq(WriteVcdAnnotation,VerilatorBackendAnnotation)) { c => 

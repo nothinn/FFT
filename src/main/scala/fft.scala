@@ -1,6 +1,8 @@
 import chisel3._
 import chisel3.util._
 
+import chisel3.experimental.ChiselEnum
+
 class FFT_IO(val bitwidth: Int, val samples: Int) extends Bundle{
         //val audio_ready = Input(Bool()) //Indicates that the audio memory is filled
         val running     = Output(Bool())//Indicates that the FFT is being calculated
@@ -26,47 +28,130 @@ class MemReq extends Bundle{
     val data_in = Input(UInt(32.W))
     val write   = Output(Bool())
     val en      = Output(Bool())
+    val valid   = Input(Bool())
 }
 
-class FFTSingleMem(samples: Int, bitwidth: Int, bp: Int) extends Module{
+
+
+class FFTSingle(samples: Int, bitwidth: Int, bp: Int) extends Module{ //bitwidth is the incoming bitwidth
 
     val io = IO(new Bundle{
         val running = Output(Bool())
-        val start   = Input(Bool())
-
-        val mem     = new MemReq()
+        val start = Input(Bool())
+        
+        val mem = new MemReq()
     })
 
+    val agu = Module(new AGU(samples))
 
-    val fft = Module(new FFT(samples,bitwidth,bp))
+    val bfu = Module(new BFU(bitwidth,bp))
+    val twiddle = Module(new Twiddle(samples,bp+1))
+    val stall = WireDefault(1.B)
+
+    //If even, result is in same memory as samples were stored.
+    //Else, it is in the opposite memory.
+    val finalMemory = log2Ceil(samples) % 2 
+
+    agu.io.stall := stall
+
+    //two registers for input to BFU
+    val input = Reg(Vec(2,UInt((bitwidth*2).W)))
+
+    val mem_chooser = RegInit(0.U)
+
+    twiddle.io.addr := agu.io.twiddle_addr
 
 
-    io.running := fft.io.running
-    fft.io.start := io.start
+    bfu.io.a_real := input(0)(bitwidth-1,0).asSInt()
+    bfu.io.a_imag := input(0)(bitwidth*2-1,bitwidth).asSInt()
 
+    bfu.io.b_real := input(1)(bitwidth-1,0).asSInt()
+    bfu.io.b_imag := input(1)(bitwidth*2-1,bitwidth).asSInt()
 
-    val memRegVec = Reg(Vec(4,UInt(32.W)))
-    val memEn     = Wire(Vec(4,Bool()))
-
-
-
-    val arbiter = Module(new Arbiter(new MemReq(),4))
-
-
-
-    val memResp   = Reg(Vec(4,Bool()))
-
-    //fft.io.mem_audioA_dataIn := memRegVec(0)
-    //fft.io.mem_audioB_dataIn := memRegVec(1)
-    //fft.io.mem_FFTA_dataIn   := memRegVec(2)
-    fft.io.mem_FFTB.data_in   := memRegVec(3)
-
+    bfu.io.twiddle_real := twiddle.io.twiddle_real
+    bfu.io.twiddle_imag := twiddle.io.twiddle_imag
     
-    fft.io.stall := ~memResp.asUInt().andR() //Stall when not all requests are valid
-    
 
+    object S extends ChiselEnum{
+        val idle, load0, load1, store0, store1, agu = Value
+    }
 
+    when(agu.io.switch & ~stall){
+        mem_chooser := ~mem_chooser
+    }
+
+    io.mem.data_out := DontCare
+    io.mem.addr := DontCare
+    io.mem.write := 0.B
+    io.mem.en := 1.B
+
+    io.running := ~agu.io.done
+
+    agu.io.start := io.start
+
+    val state = RegInit(S.idle)
+    switch(state){
+        is(S.idle){
+            when(io.start | ~agu.io.done){
+                state := S.load0
+                io.mem.addr := mem_chooser ## agu.io.a_addr_read
+            }
+        }
+        is(S.load0){
+            io.mem.addr := mem_chooser ## agu.io.a_addr_read
+            when(io.mem.valid){
+                state := S.load1
+                input(0) := io.mem.data_in
+                io.mem.addr := mem_chooser ## agu.io.b_addr_read
+            }
+        }
+        is(S.load1){
+            io.mem.addr := mem_chooser ## agu.io.b_addr_read
+            io.mem.data_out := bfu.io.a_out_imag ## bfu.io.a_out_real
+            when(io.mem.valid){
+                state := S.store0
+                input(1) := io.mem.data_in
+                io.mem.addr := ~mem_chooser ##  agu.io.b_addr_write
+                io.mem.data_out := bfu.io.b_out_imag ## bfu.io.b_out_real
+            }
+        }
+        is(S.store0){
+            io.mem.write := 1.B
+            io.mem.addr := ~mem_chooser ##  agu.io.a_addr_write
+            io.mem.data_out := bfu.io.a_out_imag ## bfu.io.a_out_real
+            when(io.mem.valid & RegNext(state === S.store0)){ //Needs minimum one cycle
+                state := S.store1
+                io.mem.addr := ~mem_chooser ##  agu.io.b_addr_write
+                io.mem.data_out := bfu.io.b_out_imag ## bfu.io.b_out_real
+            }
+        }
+        is(S.store1){
+            io.mem.write := 1.B
+            io.mem.addr := ~mem_chooser ## agu.io.b_addr_write
+            io.mem.data_out := bfu.io.b_out_imag ## bfu.io.b_out_real
+            when(io.mem.valid){
+                io.mem.write := 0.B
+                state := S.agu
+                stall := 0.B
+            }
+        }
+        is(S.agu){
+            //when(agu.io.done){
+                state := S.idle
+            //}.otherwise{
+            //    state := S.load0
+           // }
+        }
+    }
 }
+
+
+
+
+
+
+
+
 
 class FFT(samples: Int, bitwidth: Int, bp: Int) extends Module{ //bitwidth is the incoming bitwidth
 
