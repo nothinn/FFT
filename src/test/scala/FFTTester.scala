@@ -1,3 +1,5 @@
+package fft
+
 import chisel3._
 import chisel3.util._
 import org.scalatest._
@@ -58,13 +60,15 @@ class FFTSingleTest extends FlatSpec with ChiselScalatestTester with Matchers {
 
   it should "Calculate an 8 point FFT" in {
 
-    val bp = 11 //Binary point, number of fractional bits.
+    val bp = 8 //Binary point, number of fractional bits.
     val one = (1<<bp)-1
     val input = Seq(one,one,one,0,0,0,0,0)
     val samples = input.length
     val bitwidth = bp + 1 + log2Ceil(samples) //Bitgrowth = number of fractional bits + 1 for sign + number of levels
     test(new FFTTestSingleModule(bitwidth,samples, bp)).withAnnotations(Seq(WriteVcdAnnotation,VerilatorBackendAnnotation)) { c => 
 
+      c.clock.setTimeout(10000)
+      
       c.io.testMemReq.write.poke(1.B)
       //Fill out memory
 
@@ -112,7 +116,7 @@ class FFTSingleTest extends FlatSpec with ChiselScalatestTester with Matchers {
         c.clock.step(1)
         val out1 = c.io.testMemReq.data_in.peek()
         
-        //Float 2 fixed
+        //Fixed 2 float
         def int2float(int: BigInt, bitwidth: Int, bp: Int) = {
 
           var real_int = int & ((1<<bitwidth)-1)
